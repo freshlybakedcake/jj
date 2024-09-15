@@ -1009,7 +1009,24 @@ pub fn reset_head(
         } else {
             false
         };
-        let skip_reset = if is_same_tree {
+
+        let mut index_tree = &new_git_commit.tree()?;
+        
+        let mut intent_to_add_added = TreeUpdateBuilder::new();
+        let empty_file = Oid::zero(); // @minion3665: need to verify (poor? uneducated?) assumption that empty files are Oid::zero
+        // @minion3665: somehow we need to get the files to upsert here - I guess we need to compare working copy files with the ones in the tree, and the auto-track path?
+        // @minion3665: could we compare with the next commit instead? that way we also get things that are manually tracked...
+        // @minion3665: yes, probably, let's try that...
+
+        let difference = git_repo.diff_tree_to_tree(
+            Some(index_tree),
+            Some(&wc_commit.tree()?),
+            None,
+        ); // TODO: do we need some of the untracked https://docs.rs/git2/latest/git2/struct.DiffOptions.html ? - is unclear whether untraked is for both sides (and therefore added files would be ignored) or not...
+
+        index_tree = index_tree.create_updated(intent_to_add_added);
+
+        let skip_reset = false; /* @minion3665: commented this out... it shouldn't correctly detect intent-to-add, so will be wrong sometimes: if is_same_tree {
             // `HEAD@git` already points to a commit with the correct tree contents,
             // so we only need to reset the Git index. We can skip the reset if
             // the Git index is empty (i.e. `git add` was never used).
@@ -1017,16 +1034,22 @@ pub fn reset_head(
             // (~0.89s to check the diff, vs. ~1.72s to reset), and around 8% slower if
             // it isn't (~1.86s to check the diff AND reset).
             let diff = git_repo.diff_tree_to_index(
-                Some(&new_git_commit.tree()?),
-                None,
+                Some(index_tree), // @minion3665: old_tree - used for the "old file" side of the delta
+                None, // @coded: This is an index, if None is passed it gets the latest on the disk
                 Some(git2::DiffOptions::new().skip_binary_check(true)),
-            )?;
-            diff.deltas().len() == 0
+            )?; // @minion3665: can we change this to figure out when intent-to-added files are added rather than an empty index? eliminates need for path 3
+            diff.deltas().len() == 0 // @coded: returns true if there's no diff between CI and NGC.tree()
+            // @minion3665: TODO: check this returns false if there are intent-to-added files. If not, remove this optimization
         } else {
             false
-        };
+        }; */
         if !skip_reset {
-            git_repo.reset(new_git_commit.as_object(), git2::ResetType::Mixed, None)?;
+            // @minion3665: path 2: we're resetting the commit and index
+            git_repo.reset(new_git_commit.as_object(), git2::ResetType::Soft, None)?;
+            // @minion3665: update the index separately - need to make a new tree with the correct content
+            let mut index = git_repo.index()?;
+            index.read_tree(index_tree)?;
+            index.write()?;
         }
     } else {
         // Can't detach HEAD without a commit. Use placeholder ref to nullify the HEAD.
@@ -1044,8 +1067,24 @@ pub fn reset_head(
         // git_reset() of libgit2 requires a commit object. Do that manually.
         let mut index = git_repo.index()?;
         index.clear()?; // or read empty tree
+
+        /* @minion3665: index.add(IndexEntry {
+            // ctime,
+            // mtime,
+            // dev,
+            // ino,
+            // mode,
+            // uid,
+            // gid,
+            // file_size,
+            // id,
+            // IndexEntryExtendedFlag::INTENT_TO_ADD,
+            // path,
+        })?; */
+
         index.write()?;
         git_repo.cleanup_state()?;
+        // @minion3665: path 1: branch is unborn
     }
     mut_repo.set_git_head_target(first_parent);
     Ok(())
